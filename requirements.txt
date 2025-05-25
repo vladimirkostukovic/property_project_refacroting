@@ -1,0 +1,38 @@
+# Database
+psycopg2-binary>=2.9.5
+asyncpg>=0.27.0
+sqlalchemy>=1.4.0
+
+# Networking & API (FTP/SFTP, HTTP)
+aiohttp>=3.8.5
+urllib3>=1.26.8
+pysftp>=0.2.9
+paramiko>=2.10.1
+cryptography>=36.0.0
+
+# Caching & Redis
+redis>=4.3.4
+cachetools>=5.3.0
+
+# Date & Scheduling
+python-dateutil>=2.8.2
+APScheduler>=3.9.1
+
+# Image processing & vectors
+Pillow>=9.4.0
+numpy>=1.23.5
+ImageHash>=4.3.1
+annoy>=1.17.3
+
+# System utilities
+psutil>=5.9.0
+tqdm>=4.64.0
+
+# Console/table utilities
+tabulate>=0.8.10
+unidecode>=1.3.6
+
+# Parsing, dataframes, fuzzy
+pandas>=1.4.0
+python-dotenv>=0.20.0
+rapidfuzz>=2.10.0

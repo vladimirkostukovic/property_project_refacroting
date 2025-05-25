@@ -1,0 +1,25 @@
+# Ignore Anaconda and Python env files
+.anaconda/
+.env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore IDE/editor config files
+.vscode/
+.idea/
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore data/cache files
+cache/
+cache_data/
+ds.store
+
+# Ignore config files with secrets
+config.py
+config.json
+test.py
