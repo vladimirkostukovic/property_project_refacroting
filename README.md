@@ -1,7 +1,7 @@
 Autor https://www.linkedin.com/in/vladimirkostukovic/
 
 
-Real Estate Data Pipeline (Gold Layer Refactoring)
+Real Estate Data Pipeline (up to Gold Layer Refactoring)
 
 This repository presents the refactored version of real estate analytics project, reworked up to the “gold layer” level. The main focus here is on robust ETL pipelines, data verification, and preparing the foundation for scalable analytics.
 
