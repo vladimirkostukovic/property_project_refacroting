@@ -1,20 +1,14 @@
-import pandas as pd
 import re
+from dotenv import load_dotenv
+import pandas as pd
 import json
 import logging
 from datetime import date, timedelta
 from sqlalchemy import create_engine, text
-import os
-from dotenv import load_dotenv
+from config import DB_URL
 
-# ===================== LOAD ENV ============================
+# ===================== ENV LOADING ============================
 load_dotenv()
-
-PG_HOST = os.getenv("PG_HOST")
-PG_PORT = os.getenv("PG_PORT")
-PG_DB = os.getenv("PG_DB")
-PG_USER = os.getenv("PG_USER")
-PG_PASS = os.getenv("PG_PASS")
 
 # ===================== LOGGING AND UTILS =======================
 logging.basicConfig(
@@ -28,7 +22,7 @@ def stat_row(label, value):
     print(f"{label:<50}: {value}")
 
 print("="*70)
-print("CUSTOM ETL SCRIPT: Listings Loading (source_id=4)".center(70))
+print("IDNES ETL SCRIPT: Listings Loading".center(70))
 print("="*70)
 # ===================== Address Parse Utility ====================
 def parse_address(addr):
@@ -61,7 +55,7 @@ def parse_address(addr):
         result['city_part'] = city_match.group(2).strip()
     else:
         result['city'] = first
-    # Street and house number (basic, improve as needed)
+    # Street and house number
     street_match = re.match(r"^([^\d,]+)\s+(\d+\w*)$", first)
     if street_match:
         result['street'] = street_match.group(1).strip()
@@ -72,9 +66,7 @@ def parse_address(addr):
 
 # ===================== DB CONNECTION ===========================
 log.info("1. Connecting to database...")
-db_url = f"postgresql://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}"
-engine = create_engine(db_url)
-
+engine = create_engine(DB_URL)
 # ===================== GET LATEST SOURCE TABLE ================
 log.info("2. Finding the latest source table for source_id=4...")
 with engine.connect() as conn:
@@ -270,7 +262,7 @@ price_snap_table = f"prices_{today.strftime('%Y_%m_%d')}"
 price_yest_table = f"prices_{yesterday.strftime('%Y_%m_%d')}"
 price_old_table = f"prices_{day_before.strftime('%Y_%m_%d')}"
 
-# Проверяем есть ли таблица с сегодняшним снэпшотом
+# Daily snapshot
 with engine.connect() as conn:
     result = conn.execute(text("""
         SELECT table_name FROM information_schema.tables 
@@ -279,7 +271,7 @@ with engine.connect() as conn:
     today_exists = result.scalar() is not None
 
 try:
-    # Только internal_id и price — никакого source_id
+    # Internal_id and price only
     price_snapshot = pd.read_sql(
         "SELECT internal_id, price FROM public.standartize WHERE price IS NOT NULL",
         con=engine

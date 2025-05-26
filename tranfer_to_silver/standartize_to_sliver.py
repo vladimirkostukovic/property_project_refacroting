@@ -1,51 +1,32 @@
 import pandas as pd
-import numpy as np
 import logging
 from sqlalchemy import create_engine, text
 from datetime import date
-from config import DB_URL  # <--- вот так
+from config import DB_URL
 
-# ========== Logging Setup ==========
+# === Logging ===
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
 log = logging.getLogger(__name__)
-
 engine = create_engine(DB_URL)
 
-# ========== Category Mapping ==========
+# === Category mapping ===
 category_map = {
-    'byty':      (1, 'Byty'),
-    'apartments': (1, 'Byty'),
-    'byty k prodeji': (1, 'Byty'),
-    'byty k pronájmu': (1, 'Byty'),
-    'byty k pronajmu': (1, 'Byty'),
-
-    'domy':      (2, 'Domy'),
-    'houses':    (2, 'Domy'),
-    'rodinné domy': (2, 'Domy'),
-    'chaty a chalupy': (2, 'Domy'),
-    'novostavby': (2, 'Domy'),
-
-    'pozemky':   (3, 'Pozemky'),
-    'land':      (3, 'Pozemky'),
+    'byty': (1, 'Byty'), 'apartments': (1, 'Byty'), 'byty k prodeji': (1, 'Byty'),
+    'byty k pronájmu': (1, 'Byty'), 'byty k pronajmu': (1, 'Byty'),
+    'domy': (2, 'Domy'), 'houses': (2, 'Domy'), 'rodinné domy': (2, 'Domy'),
+    'chaty a chalupy': (2, 'Domy'), 'novostavby': (2, 'Domy'),
+    'pozemky': (3, 'Pozemky'), 'land': (3, 'Pozemky'),
     'pozemky, zahrady a historické stavby': (3, 'Pozemky'),
-
-    'komerční':  (4, 'Komerční'),
-    'komercni':  (4, 'Komerční'),
-    'commercial': (4, 'Komerční'),
+    'komerční': (4, 'Komerční'), 'komercni': (4, 'Komerční'), 'commercial': (4, 'Komerční'),
     'komerční objekty': (4, 'Komerční'),
-
-    'ostatní':   (5, 'Ostatní'),
-    'ostatni':   (5, 'Ostatní'),
-    'ostatní nemovitosti': (5, 'Ostatní'),
-    'garages':   (5, 'Ostatní'),
-    'garáže a drobné objekты': (5, 'Ostatní'),
-    'garáže':    (5, 'Ostatní'),
-    'nemovitosti v zahraničí': (5, 'Ostatní'),
-    'prodej':    (5, 'Ostatní'),  # fallback
+    'ostatní': (5, 'Ostatní'), 'ostatni': (5, 'Ostatní'),
+    'ostatní nemovitosti': (5, 'Ostatní'), 'garages': (5, 'Ostatní'),
+    'garáže a drobné objekты': (5, 'Ostatní'), 'garáže': (5, 'Ostatní'),
+    'nemovitosti v zahraničí': (5, 'Ostatní'), 'prodej': (5, 'Ostatní'),
 }
 
 def map_category(name):
@@ -57,13 +38,11 @@ def map_category(name):
             return category_map[k]
     return (5, 'Ostatní')
 
-# ========== Загружаем обе таблицы ==========
+# === Load source table ===
 log.info("Loading public.standartize...")
 df = pd.read_sql("SELECT * FROM public.standartize", con=engine)
-log.info("Loading silver.standartize_silver...")
-df_silver = pd.read_sql("SELECT * FROM silver.standartize_silver", con=engine)
 
-# ========== Преобразования и категоризация ==========
+# === Transform ===
 df[['category_value', 'category_name']] = df['category_name'].apply(lambda x: pd.Series(map_category(x)))
 for col in ['added_date', 'archived_date']:
     if col in df.columns:
@@ -78,53 +57,89 @@ required_columns = [
 ]
 df = df[required_columns]
 
-# ========== Сравнение ==========
-# Для новых строк: нет такого internal_id в silver
-new_mask = ~df['internal_id'].isin(df_silver['internal_id'])
-df_new = df[new_mask].copy()
+# === Load silver.standartize_silver ===
+log.info("Loading silver.standartize_silver...")
+df_silver = pd.read_sql("SELECT internal_id, avalaible, archived_date FROM silver.standartize_silver", con=engine)
 
-# Для изменённых строк: есть, но хотя бы один из важных столбцов изменился
-compare_cols = ['avalaible', 'archived_date']
-df_merged = df.merge(df_silver[['internal_id'] + compare_cols], on='internal_id', how='inner', suffixes=('', '_old'))
-changed_mask = (
-    (df_merged['avalaible'] != df_merged['avalaible_old']) |
-    (df_merged['archived_date'] != df_merged['archived_date_old'])
+# === Load silver.standartize_geo ===
+log.info("Loading silver.standartize_geo...")
+df_geo = pd.read_sql("SELECT internal_id, avalaible, archived_date FROM silver.standartize_geo", con=engine)
+
+# === Detect new & changed for silver ===
+new_mask_silver = ~df['internal_id'].isin(df_silver['internal_id'])
+df_new_silver = df[new_mask_silver].copy()
+
+merged_silver = df.merge(df_silver, on='internal_id', how='inner', suffixes=('', '_old'))
+changed_mask_silver = (
+    (merged_silver['avalaible'] != merged_silver['avalaible_old']) |
+    (merged_silver['archived_date'] != merged_silver['archived_date_old'])
 )
-df_changed = df_merged[changed_mask].copy()
+df_changed_silver = merged_silver[changed_mask_silver].copy()
 
-log.info(f"New rows: {len(df_new)}, changed rows: {len(df_changed)}")
+# === Detect new & changed for geo ===
+new_mask_geo = ~df['internal_id'].isin(df_geo['internal_id'])
+df_new_geo = df[new_mask_geo].copy()
 
-# ========== Сохраняем новые строки ==========
-if not df_new.empty:
-    log.info(f"Inserting {len(df_new)} NEW rows...")
-    df_new.to_sql('standartize_silver', con=engine, schema='silver', if_exists='append', index=False)
+merged_geo = df.merge(df_geo, on='internal_id', how='inner', suffixes=('', '_old'))
+changed_mask_geo = (
+    (merged_geo['avalaible'] != merged_geo['avalaible_old']) |
+    (merged_geo['archived_date'] != merged_geo['archived_date_old'])
+)
+df_changed_geo = merged_geo[changed_mask_geo].copy()
 
-# ========== Массовое обновление изменённых ==========
-# 1. Кладём изменённые строки во временную таблицу
-if not df_changed.empty:
-    temp_table = 'tmp_standartize_updates'
-    with engine.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS silver.{temp_table}"))
-    df_changed[['internal_id', 'avalaible', 'archived_date']].to_sql(
-        temp_table, con=engine, schema='silver', if_exists='replace', index=False
-    )
-    log.info(f"Updating {len(df_changed)} CHANGED rows in silver.standartize_silver via UPDATE JOIN...")
+# === Insert new to silver ===
+if not df_new_silver.empty:
+    df_new_silver.to_sql('standartize_silver', con=engine, schema='silver', if_exists='append', index=False)
+    log.info(f"Inserted {len(df_new_silver)} rows into silver.standartize_silver.")
+
+# === Update existing in silver ===
+if not df_changed_silver.empty:
+    temp = 'tmp_silver_updates'
+    df_changed_silver[['internal_id', 'avalaible', 'archived_date']].to_sql(temp, con=engine, schema='silver', if_exists='replace', index=False)
     update_sql = f"""
         UPDATE silver.standartize_silver t
         SET
             avalaible = tmp.avalaible,
             archived_date = tmp.archived_date
-        FROM silver.{temp_table} tmp
+        FROM silver.{temp} tmp
         WHERE t.internal_id = tmp.internal_id
     """
     with engine.begin() as conn:
         conn.execute(text(update_sql))
-        conn.execute(text(f"DROP TABLE silver.{temp_table}"))
+        conn.execute(text(f"DROP TABLE silver.{temp}"))
+    log.info(f"Updated {len(df_changed_silver)} rows in silver.standartize_silver.")
 
-# ========== Summary ==========
-log.info(f"Summary: {len(df_new)} added, {len(df_changed)} updated.")
-print("="*60)
-print(f"Summary for {date.today()}:")
-print(f"Rows added: {len(df_new)}")
-print(f"Rows changed (availability/archive): {len(df_changed)}")
-print("="*60)
+# === Insert new to geo ===
+if not df_new_geo.empty:
+    df_new_geo.to_sql('standartize_geo', con=engine, schema='silver', if_exists='append', index=False)
+    log.info(f"Inserted {len(df_new_geo)} rows into silver.standartize_geo.")
+
+# === Update existing in geo ===
+if not df_changed_geo.empty:
+    temp_geo = 'tmp_geo_updates'
+    df_changed_geo[['internal_id', 'avalaible', 'archived_date']].to_sql(temp_geo, con=engine, schema='silver', if_exists='replace', index=False)
+    update_sql_geo = f"""
+        UPDATE silver.standartize_geo g
+        SET
+            avalaible = tmp.avalaible,
+            archived_date = tmp.archived_date
+        FROM silver.{temp_geo} tmp
+        WHERE g.internal_id = tmp.internal_id
+    """
+    with engine.begin() as conn:
+        conn.execute(text(update_sql_geo))
+        conn.execute(text(f"DROP TABLE silver.{temp_geo}"))
+    log.info(f"Updated {len(df_changed_geo)} rows in silver.standartize_geo.")
+
+# === Final log ===
+print("=" * 60)
+print(f"Sync summary — {date.today()}")
+print()
+print("Table: silver.standartize_silver")
+print(f"  Rows added   : {len(df_new_silver)}")
+print(f"  Rows updated : {len(df_changed_silver)}")
+print()
+print("Table: silver.standartize_geo")
+print(f"  Rows added   : {len(df_new_geo)}")
+print(f"  Rows updated : {len(df_changed_geo)}")
+print("=" * 60)

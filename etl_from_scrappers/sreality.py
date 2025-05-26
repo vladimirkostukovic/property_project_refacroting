@@ -5,15 +5,10 @@ import os
 from datetime import date, timedelta
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from config import DB_URL
 
 # ===================== LOAD ENV ============================
 load_dotenv()
-
-PG_HOST = os.getenv("PG_HOST")
-PG_PORT = os.getenv("PG_PORT")
-PG_DB = os.getenv("PG_DB")
-PG_USER = os.getenv("PG_USER")
-PG_PASS = os.getenv("PG_PASS")
 
 # ===================== LOGGING AND UTILS =======================
 logging.basicConfig(
@@ -32,8 +27,7 @@ print("="*70)
 
 # ===================== DB CONNECTION ===========================
 log.info("1. Connecting to database...")
-db_url = f"postgresql://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}"
-engine = create_engine(db_url)
+engine = create_engine(DB_URL)
 # ===================== GET LATEST SOURCE TABLE ================
 log.info("2. Finding the latest sreality table...")
 with engine.connect() as conn:
@@ -205,7 +199,7 @@ try:
                     changed_price_count = len(df_changed)
                     stat_row("Price changes detected (by snapshot)", changed_price_count)
 
-                    # Можно bulk insert через DataFrame — быстрее:
+                    # Bulk insert
                     insert_cols = ['internal_id', 'old_price', 'new_price', 'price_date']
                     with engine.begin() as conn2:
                         df_changed[insert_cols].to_sql(
@@ -272,10 +266,10 @@ existing_photo_links = pd.read_sql("""
     FROM public.sreality_links_photo
 """, con=engine)
 
-# Create a set of tuples (internal_id, photo_url) for fast lookup
+# set of tuples (internal_id, photo_url) for fast lookup
 existing_set = set(zip(existing_photo_links['internal_id'], existing_photo_links['photo_url']))
 
-# Create a dict for fast access: site_id -> images
+# dict for fast access: site_id -> images
 site_images_map = dict(zip(df['site_id'], df['images']))
 
 photo_links = []

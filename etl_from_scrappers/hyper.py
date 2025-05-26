@@ -22,7 +22,7 @@ def stat_row(label, value):
     print(f"{label:<50}: {value}")
 
 print("="*70)
-print("IDNES ETL SCRIPT: Listings Loading".center(70))
+print("Hyper ETL SCRIPT: Listings Loading".center(70))
 print("="*70)
 
 # ===================== DB CONNECTION ===========================
@@ -76,10 +76,9 @@ df_standart['deal_type'] = df_data.get('Typ nabídky').str.lower()
 # Очистка цены — оставляем только цифры и преобразуем к float
 df_standart['price'] = df_data.get('Celkem').str.replace(r'[^\d]', '', regex=True).replace('', None).astype('float64')
 
-# Кол-во комнат — можно оставить как есть или привести к удобному виду
+# ROOMS
 df_standart['rooms'] = df_data.get('Podkategorie').str.lower()
-
-# Площади — чистим от единиц измерения, меняем запятую на точку
+#Area
 def clean_area(col):
     if col is None:
         return None
@@ -181,7 +180,7 @@ price_yest_table = f"prices_{yesterday.strftime('%Y_%m_%d')}"
 price_old_table = f"prices_{day_before.strftime('%Y_%m_%d')}"
 
 try:
-    # Сохраняем только internal_id и price (никаких source_id!)
+    # ONLY internal_id и price
     price_snapshot = pd.read_sql(
         "SELECT internal_id, price FROM public.standartize WHERE price IS NOT NULL",
         con=engine
@@ -192,7 +191,7 @@ except Exception as e:
 
 if not price_snapshot.empty:
     with engine.begin() as conn:
-        # Проверяем, есть ли уже снапшот за сегодня
+        # Check for snapshot
         result = conn.execute(text("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = 'public' AND table_name = :today_table
