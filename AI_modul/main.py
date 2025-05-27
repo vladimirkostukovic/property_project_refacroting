@@ -30,6 +30,7 @@ scheduler = None
 processor = None
 running_job = False
 terminate = False
+MAX_RETRIES = 3
 
 # === SIGNAL HANDLERS ===
 def setup_signal_handlers():
@@ -44,55 +45,67 @@ def setup_signal_handlers():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+# === ALERT PLACEHOLDER ===
+def send_alert(job_name, error_msg):
+    # TODO: implement real alert (email/telegram)
+    log.critical(f"[ALERT] Job '{job_name}' failed after {MAX_RETRIES} retries. Error: {error_msg}")
+
 # === UTILS ===
 def is_time_to_run():
     return datetime.now().hour >= 9
 
 # === DB PREP ===
 def prepare_database():
-    config = Config("config.json")
-    db_handler = DatabaseHandler(config.get_db_config())
-    db_handler.ensure_schema()
-    total = 0
-    while True:
-        migrated = db_handler.migrate_existing_images()
-        if not migrated:
-            break
-        total += migrated
-        log.info(f"Migrated {total} images so far")
-    log.info(f"Database prep done, total migrated: {total}")
-    db_handler.close()
+    try:
+        config = Config("config.json")
+        db_handler = DatabaseHandler(config.get_db_config())
+        db_handler.ensure_schema()
+        total = 0
+        while True:
+            migrated = db_handler.migrate_existing_images()
+            if not migrated:
+                break
+            total += migrated
+            log.info(f"Migrated {total} images so far")
+        log.info(f"Database prep done, total migrated: {total}")
+        db_handler.close()
+    except Exception as e:
+        log.error(f"Error in prepare_database: {e}")
+        send_alert("prepare_database", str(e))
 
 # === JOBS ===
-def process_images_job():
-    global running_job, processor
-    if running_job or not is_time_to_run():
-        log.info("Job already running or too early")
+def safe_execute(job_func, job_name):
+    global running_job
+    if running_job:
+        log.info(f"{job_name} already running, skipping")
         return
-    try:
-        running_job = True
-        log.info("Scheduled image processing job started")
-        processor.run()
-        log.info("Processing job complete")
-    except Exception as e:
-        log.error(f"Processing job failed: {str(e)}")
-    finally:
-        running_job = False
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            running_job = True
+            log.info(f"{job_name} started")
+            job_func()
+            log.info(f"{job_name} completed")
+            break
+        except Exception as e:
+            retries += 1
+            log.warning(f"{job_name} failed (attempt {retries}/{MAX_RETRIES}): {e}")
+            time.sleep(5)
+            if retries == MAX_RETRIES:
+                send_alert(job_name, str(e))
+        finally:
+            running_job = False
+
+
+def process_images_job():
+    if is_time_to_run():
+        safe_execute(lambda: processor.run(), "ImageProcessing")
+    else:
+        log.info("Too early to run image processing")
+
 
 def process_duplicates_job():
-    global running_job, processor
-    if running_job:
-        log.info("Job already running, skipping")
-        return
-    try:
-        running_job = True
-        log.info("Scheduled deduplication job started")
-        processor.process_all_duplicates()
-        log.info("Deduplication job complete")
-    except Exception as e:
-        log.error(f"Deduplication job failed: {str(e)}")
-    finally:
-        running_job = False
+    safe_execute(lambda: processor.process_all_duplicates(), "Deduplication")
 
 # === SERVICE RUN ===
 def run_service(config_file, run_once=False, dedup_only=False, complete=False):
@@ -120,9 +133,9 @@ def run_service(config_file, run_once=False, dedup_only=False, complete=False):
             scheduler.start()
         else:
             if dedup_only:
-                processor.process_all_duplicates()
+                process_duplicates_job()
             elif complete:
-                processor.run_process_and_deduplicate()
+                safe_execute(lambda: processor.run_process_and_deduplicate(), "ProcessAndDeduplicate")
             elif is_time_to_run():
                 process_images_job()
             else:
@@ -130,7 +143,8 @@ def run_service(config_file, run_once=False, dedup_only=False, complete=False):
     except (KeyboardInterrupt, SystemExit):
         log.info("Service interrupted, shutting down")
     except Exception as e:
-        log.error(f"Service error: {str(e)}")
+        log.error(f"Service error: {e}")
+        send_alert("Service", str(e))
     finally:
         if scheduler:
             scheduler.shutdown()
@@ -158,19 +172,19 @@ def main():
 
     args = parser.parse_args()
     if not args.command:
-        args.command = "batch"
+        args.command = "run"
 
     if args.command == "batch":
-        run_batched_processing(args.config, args.batch_size, args.limit)
+        log.warning("Batch mode not implemented")
     elif args.command == "run":
         setup_signal_handlers()
         run_service(args.config, args.once)
     elif args.command == "test":
-        run_test(args.config, args.entries)
+        log.warning("Test mode not implemented")
     elif args.command == "migrate":
         prepare_database()
 
 if __name__ == "__main__":
     t1 = time.time()
     main()
-    print(time.time() - t1)
+    print(f"Execution time: {round(time.time() - t1, 2)}s")
