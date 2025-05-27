@@ -207,52 +207,65 @@ if not price_snapshot.empty:
 else:
     stat_row("No data for price snapshot!", price_snap_table)
 
-# ===================== PRICE CHANGE DETECTION =============================
-changed_price_count = 0
-try:
-    with engine.connect() as conn:
-        # Check if yesterday's snapshot table exists
-        result = conn.execute(text("""
-            SELECT table_name FROM information_schema.tables 
-            WHERE table_schema = 'public' AND table_name = :yesterday_table
-        """), {'yesterday_table': price_yest_table})
-        yesterday_exists = result.scalar() is not None
+# ========== PRICE SNAPSHOT and CHANGE DETECTION ==========
+log.info("8. Creating today's price snapshot...")
+yesterday        = today - timedelta(days=1)
+price_snap_table = f"prices_{today:%Y_%m_%d}"
+price_yest_table = f"prices_{yesterday:%Y_%m_%d}"
 
-    if yesterday_exists and not price_snapshot.empty:
-        try:
-            # Load only internal_id and yesterday's price
-            price_yesterday = pd.read_sql(
-                f"SELECT internal_id, price as price_yesterday FROM public.{price_yest_table}",
-                con=engine
-            )
-            # Ensure both today's and yesterday's dataframes are not empty
-            if not price_yesterday.empty and not price_snapshot.empty:
-                # Merge by internal_id to compare prices
-                df_compare = price_snapshot.merge(
-                    price_yesterday, on="internal_id", how="inner"
-                )
-                # Find rows where the price has changed since yesterday
-                df_changed = df_compare[df_compare['price'] != df_compare['price_yesterday']].copy()
-                df_changed['old_price'] = df_changed['price_yesterday']
-                df_changed['new_price'] = df_changed['price']
-                df_changed['price_date'] = pd.to_datetime(today)
-                changed_price_count = len(df_changed)
-                stat_row("Price changes detected (by snapshot)", changed_price_count)
+# 8.1 — build today's snapshot
+price_snapshot = pd.read_sql(
+    "SELECT internal_id, price FROM public.standartize WHERE price IS NOT NULL",
+    con=engine
+)
 
-                if changed_price_count > 0:
-                    # Bulk insert all changes as new rows in history table
-                    with engine.begin() as conn2:
-                        df_changed[['internal_id', 'old_price', 'new_price', 'price_date']].to_sql(
-                            "new_price_change", con=conn2, schema="public", if_exists="append", index=False
-                        )
-            else:
-                stat_row("Yesterday's price snapshot is empty!", price_yest_table)
-        except Exception as e:
-            log.error(f"Error comparing with yesterday's snapshot: {e}")
+if price_snapshot.empty:
+    log.info("No data for today's price snapshot → skipping change detection")
+else:
+    with engine.begin() as conn:
+        price_snapshot.to_sql(
+            price_snap_table,
+            con=conn,
+            schema="public",
+            if_exists="replace",
+            index=False
+        )
+    stat_row("Snapshot table created/replaced", price_snap_table)
+
+    # detect changes against yesterday
+    log.info("9. Detecting price changes against yesterday's snapshot...")
+    yesterday_exists = engine.dialect.has_table(
+        engine.connect(), price_yest_table, schema="public"
+    )
+
+    if not yesterday_exists:
+        stat_row("Yesterday's snapshot not found", price_yest_table)
     else:
-        stat_row("Yesterday's snapshot table does not exist, skipping price change detection", price_yest_table)
-except Exception as e:
-    log.error(f"Error checking yesterday's snapshot table: {e}")
+        price_yesterday = pd.read_sql(
+            f"SELECT internal_id, price AS old_price FROM public.{price_yest_table}",
+            con=engine
+        )
+        df_compare = price_snapshot.merge(
+            price_yesterday, on="internal_id", how="inner"
+        )
+        df_changed = df_compare[df_compare["price"] != df_compare["old_price"]].copy()
+
+        if df_changed.empty:
+            stat_row("No price changes detected", price_snap_table)
+        else:
+            df_changed["new_price"]  = df_changed["price"]
+            df_changed["price_date"] = pd.to_datetime(today)
+            df_history = df_changed[["internal_id","old_price","new_price","price_date"]]
+
+            with engine.begin() as conn:
+                df_history.to_sql(
+                    "price_change",
+                    con=conn,
+                    schema="public",
+                    if_exists="append",  # история растёт
+                    index=False
+                )
+            stat_row("Price changes logged", len(df_history))
 
 # ===================== OLD SNAPSHOT TABLE DELETION ========================
 try:
@@ -369,4 +382,4 @@ stat_row("Archived listings", len(archived_ids))
 stat_row("Price changes", changed_price_count)
 stat_row("New sellers", seller_new.shape[0] if not seller_new.empty else 0)
 print("-"*70)
-log.info("✅ All steps successfully completed!")
+log.info("All steps successfully completed!")
