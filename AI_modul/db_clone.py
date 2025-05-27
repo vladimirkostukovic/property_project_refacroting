@@ -1,149 +1,214 @@
-import os
-import sys
-import json
 import psycopg2
 import logging
+import sys
 
-# === LOGGING SETUP ===
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# === CONFIG LOADING ===
-def load_config(config_path="config.json"):
-    if not os.path.exists(config_path):
-        log.error(f"Config file {config_path} not found.")
-        sys.exit(1)
-    with open(config_path, "r") as f:
-        return json.load(f)
+# Connection parameters
+REMOTE_HOST = "176.102.66.84"
+REMOTE_PORT = 5432
+REMOTE_DB = "reality_data"
+REMOTE_USER = "scrapper"
+REMOTE_PASSWORD = "DR0IKJw7UrEbZkQK"
 
-# === MAIN COPY FUNCTION ===
-def copy_table(cfg):
-    remote = cfg["remote_db"]
-    local = cfg["local_db"]
-    schema = cfg.get("schema", "public")
-    table = cfg["table"]
-    batch_size = cfg.get("batch_size", 1000)
+LOCAL_HOST = "localhost"
+LOCAL_PORT = 5432
+LOCAL_DB = "sreality"
+LOCAL_USER = "postgres"
+LOCAL_PASSWORD = "postgres"
 
+TABLE_NAME = "image_links"
+SCHEMA_NAME = "public"
+
+
+def copy_table():
+    """Copy table from remote database to local database."""
     remote_conn = None
     local_conn = None
 
     try:
-        # === CONNECTIONS ===
-        log.info("Connecting to remote database...")
-        remote_conn = psycopg2.connect(**remote)
-        log.info("Connecting to local database...")
-        local_conn = psycopg2.connect(**local)
+        # Connect to remote database
+        logger.info("Connecting to remote database...")
+        remote_conn = psycopg2.connect(
+            host=REMOTE_HOST,
+            port=REMOTE_PORT,
+            dbname=REMOTE_DB,
+            user=REMOTE_USER,
+            password=REMOTE_PASSWORD
+        )
 
-        # === GET TABLE STRUCTURE ===
-        with remote_conn.cursor() as c:
-            c.execute("""
-                SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),
-                    CASE WHEN a.attnotnull = false THEN 'YES' ELSE 'NO' END,
-                    pg_get_expr(d.adbin, d.adrelid)
-                FROM pg_catalog.pg_attribute a
-                LEFT JOIN pg_catalog.pg_attrdef d ON (a.attrelid, a.attnum) = (d.adrelid, d.adnum)
-                WHERE a.attrelid = (
-                    SELECT c.oid FROM pg_catalog.pg_class c
-                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                    WHERE c.relname = %s AND n.nspname = %s
-                ) AND a.attnum > 0 AND NOT a.attisdropped
-                ORDER BY a.attnum;
-            """, (table, schema))
-            columns = c.fetchall()
+        # Connect to local database
+        logger.info("Connecting to local database...")
+        local_conn = psycopg2.connect(
+            host=LOCAL_HOST,
+            port=LOCAL_PORT,
+            dbname=LOCAL_DB,
+            user=LOCAL_USER,
+            password=LOCAL_PASSWORD
+        )
+
+        # Get detailed table structure from remote database using pg_catalog
+        with remote_conn.cursor() as cursor:
+            logger.info(f"Retrieving table structure for {SCHEMA_NAME}.{TABLE_NAME}...")
+            cursor.execute("""
+                SELECT 
+                    a.attname AS column_name,
+                    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                    CASE 
+                        WHEN a.attnotnull = false THEN 'YES' 
+                        ELSE 'NO' 
+                    END AS is_nullable,
+                    pg_get_expr(d.adbin, d.adrelid) AS column_default
+                FROM 
+                    pg_catalog.pg_attribute a
+                LEFT JOIN 
+                    pg_catalog.pg_attrdef d ON (a.attrelid, a.attnum) = (d.adrelid, d.adnum)
+                WHERE 
+                    a.attrelid = (
+                        SELECT c.oid 
+                        FROM pg_catalog.pg_class c
+                        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                        WHERE c.relname = %s AND n.nspname = %s
+                    )
+                    AND a.attnum > 0
+                    AND NOT a.attisdropped
+                ORDER BY 
+                    a.attnum;
+            """, (TABLE_NAME, SCHEMA_NAME))
+            columns = cursor.fetchall()
+
             if not columns:
-                log.error(f"Table {schema}.{table} not found in remote DB")
-                return False
+                raise Exception(f"Table {SCHEMA_NAME}.{TABLE_NAME} not found in remote database")
 
-        # === CREATE TABLE IF NOT EXISTS ===
-        with local_conn.cursor() as c:
-            c.execute("""
+        # Check if table exists in local database
+        with local_conn.cursor() as cursor:
+            cursor.execute("""
                 SELECT 1 FROM information_schema.tables
                 WHERE table_schema = %s AND table_name = %s
-            """, (schema, table))
-            if c.fetchone() is None:
-                log.info(f"Creating table {schema}.{table} in local DB...")
-                col_defs = []
-                for name, typ, nullable, default in columns:
-                    s = f'"{name}" {typ}'
-                    if nullable == 'NO':
-                        s += " NOT NULL"
-                    if default is not None:
-                        s += f" DEFAULT {default}"
-                    col_defs.append(s)
-                create_sql = f'CREATE TABLE "{schema}"."{table}" (\n  {", ".join(col_defs)}\n)'
-                c.execute(create_sql)
-                local_conn.commit()
-                log.info("Table created.")
-            else:
-                log.info(f"Table {schema}.{table} already exists.")
+            """, (SCHEMA_NAME, TABLE_NAME))
 
-        # === GET COLUMN NAMES ===
-        with remote_conn.cursor() as c:
-            c.execute("""
-                SELECT column_name FROM information_schema.columns
+            table_exists = cursor.fetchone() is not None
+
+        # Create table in local database if it doesn't exist
+        if not table_exists:
+            logger.info(f"Creating table {SCHEMA_NAME}.{TABLE_NAME} in local database...")
+
+            with local_conn.cursor() as cursor:
+                # Create column definitions
+                column_defs = []
+                for column_name, data_type, is_nullable, default in columns:
+                    column_def = f'"{column_name}" {data_type}'
+
+                    # Add nullable constraint
+                    if is_nullable == 'NO':
+                        column_def += " NOT NULL"
+
+                    # Add default value
+                    if default is not None:
+                        column_def += f" DEFAULT {default}"
+
+                    column_defs.append(column_def)
+
+                # Create table
+                create_table_query = f"""
+                    CREATE TABLE "{SCHEMA_NAME}"."{TABLE_NAME}" (
+                        {", ".join(column_defs)}
+                    )
+                """
+                cursor.execute(create_table_query)
+                local_conn.commit()
+                logger.info(f"Table {SCHEMA_NAME}.{TABLE_NAME} created successfully")
+        else:
+            logger.info(f"Table {SCHEMA_NAME}.{TABLE_NAME} already exists in local database")
+
+        # Get column names
+        with remote_conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns 
                 WHERE table_schema = %s AND table_name = %s
                 ORDER BY ordinal_position
-            """, (schema, table))
-            col_names = [r[0] for r in c.fetchall()]
-        columns_str = ', '.join(f'"{col}"' for col in col_names)
+            """, (SCHEMA_NAME, TABLE_NAME))
+            column_names = [row[0] for row in cursor.fetchall()]
+            columns_str = ', '.join(f'"{col}"' for col in column_names)
 
-        # === COUNT ROWS ===
-        with remote_conn.cursor() as c:
-            c.execute(f'SELECT COUNT(*) FROM "{schema}"."{table}"')
-            total_rows = c.fetchone()[0]
-            log.info(f"Total rows to copy: {total_rows}")
+        # Count rows to be copied
+        with remote_conn.cursor() as cursor:
+            cursor.execute(f'SELECT COUNT(*) FROM "{SCHEMA_NAME}"."{TABLE_NAME}"')
+            total_rows = cursor.fetchone()[0]
+            logger.info(f"Found {total_rows} rows to copy")
 
-        # === DATA COPY ===
+        # Copy data in batches
+        batch_size = 1000
         offset = 0
         total_copied = 0
-        placeholders = ', '.join(['%s'] * len(col_names))
-        insert_sql = f'INSERT INTO "{schema}"."{table}" ({columns_str}) VALUES ({placeholders})'
+
+        # Prepare insert query with placeholders
+        placeholders = ', '.join(['%s'] * len(column_names))
+        insert_query = f'INSERT INTO "{SCHEMA_NAME}"."{TABLE_NAME}" ({columns_str}) VALUES ({placeholders})'
 
         while offset < total_rows:
-            with remote_conn.cursor() as c:
-                c.execute(
-                    f'SELECT {columns_str} FROM "{schema}"."{table}" LIMIT %s OFFSET %s',
+            with remote_conn.cursor() as remote_cursor:
+                # Fetch a batch of data
+                remote_cursor.execute(
+                    f'SELECT {columns_str} FROM "{SCHEMA_NAME}"."{TABLE_NAME}" LIMIT %s OFFSET %s',
                     (batch_size, offset)
                 )
-                batch = c.fetchall()
+                batch = remote_cursor.fetchall()
+
                 if not batch:
                     break
-            with local_conn.cursor() as c:
-                c.executemany(insert_sql, batch)
-            local_conn.commit()
-            total_copied += len(batch)
-            offset += batch_size
-            log.info(f"Copied {total_copied}/{total_rows} rows ({(total_copied / total_rows) * 100:.2f}%)")
 
-        log.info(f"Successfully copied {total_copied} rows to local database")
+                batch_count = len(batch)
+
+            # Insert data into local database
+            with local_conn.cursor() as local_cursor:
+                local_cursor.executemany(insert_query, batch)
+            local_conn.commit()
+
+            # Update counters
+            total_copied += batch_count
+            offset += batch_size
+
+            logger.info(f"Copied {total_copied}/{total_rows} rows ({(total_copied / total_rows) * 100:.2f}%)")
+
+        logger.info(f"Successfully copied {total_copied} rows to local database")
         return True
 
     except Exception as e:
-        log.error(f"Error copying table: {e}")
+        logger.error(f"Error copying table: {e}")
         if local_conn and local_conn.status != psycopg2.extensions.STATUS_READY:
             local_conn.rollback()
         return False
+
     finally:
+        # Close connections
         if remote_conn:
             remote_conn.close()
-            log.info("Remote connection closed")
+            logger.info("Remote connection closed")
+
         if local_conn:
             local_conn.close()
-            log.info("Local connection closed")
+            logger.info("Local connection closed")
 
-# === ENTRY POINT ===
+
 def main():
-    cfg = load_config()
-    result = copy_table(cfg)
-    if result:
-        log.info("Table copy completed successfully")
-        sys.exit(0)
-    else:
-        log.error("Table copy failed")
+    try:
+        success = copy_table()
+        if success:
+            logger.info("Table copy completed successfully")
+            sys.exit(0)
+        else:
+            logger.error("Table copy failed")
+            sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Process interrupted by user")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

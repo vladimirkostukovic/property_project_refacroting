@@ -2,55 +2,66 @@ import os
 import logging
 import shutil
 
-# === LOGGING SETUP ===
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
-log = logging.getLogger("LocalStorage")
+# Set up logging
+logger = logging.getLogger("LocalStorage")
 
-# === LOCAL STORAGE HANDLER ===
+
 class LocalStorageHandler:
-    """Local storage for test/debug mode (saves files locally, not to FTP)."""
+    """Handle local storage operations for test mode."""
 
     def __init__(self, storage_config):
         self.config = storage_config
         self.local_root = storage_config.get("local_root", "./local_images")
+
+        # Ensure the root directory exists
         os.makedirs(self.local_root, exist_ok=True)
-        log.info(f"Local storage initialized: {self.local_root}")
+        logger.info(f"Local storage initialized at: {self.local_root}")
 
     def connect(self):
-        """Ensure local storage directory exists."""
+        """Local equivalent of connect - ensure directory exists."""
+        # Check if directory exists, create if not
         if not os.path.exists(self.local_root):
             os.makedirs(self.local_root, exist_ok=True)
-            log.info(f"Created local storage dir: {self.local_root}")
+            logger.info(f"Created local storage directory: {self.local_root}")
         return True
 
     def ensure_directory(self, path):
-        """Create subdirectory inside local_root if missing."""
+        """Ensure the directory exists on the local filesystem."""
+        # Create full path by joining with root
         full_path = os.path.join(self.local_root, path.lstrip('/'))
         dir_path = os.path.dirname(full_path)
+
         if not os.path.exists(dir_path):
             os.makedirs(dir_path, exist_ok=True)
-            log.info(f"Created local dir: {dir_path}")
+            logger.info(f"Created local directory: {dir_path}")
 
     def upload_image(self, source, destination):
-        """Save image file locally (destination is relative to local_root)."""
+        """Save an image to the local filesystem."""
         try:
+            # Normalize the destination path - strip leading slash
             normalized_dest = destination.lstrip('/')
+
+            # Create full path by joining with root
             full_path = os.path.join(self.local_root, normalized_dest)
+
+            # Ensure directory exists
             dir_path = os.path.dirname(full_path)
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
+
+            # Reset file pointer to beginning
             source.seek(0)
+
+            # Open the destination file and copy the source
             with open(full_path, 'wb') as f:
                 shutil.copyfileobj(source, f)
-            log.info(f"Saved image: {full_path}")
+
+            logger.info(f"Saved image to local path: {full_path}")
             return True
         except Exception as e:
-            log.error(f"Failed to save image {destination}: {str(e)}")
+            logger.error(f"Failed to save image to {destination}: {str(e)}")
             return False
 
     def close(self):
-        """No connections to close for local."""
-        log.debug("Local storage handler closed")
+        """No connections to close for local storage."""
+        logger.debug("Local storage handler closed")
