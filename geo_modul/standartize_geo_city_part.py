@@ -1,19 +1,23 @@
+import os
+import sys
+from dotenv import load_dotenv
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import DB_URL
+
 import pandas as pd
 from sqlalchemy import create_engine
 import unidecode
 import logging
 from rapidfuzz import process, fuzz
 import psycopg2.extras
-from config import DB_URL
 
-# === Logging setup ===
+# === Setup ===
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger(__name__)
-
-# === Database connection ===
 engine = create_engine(DB_URL)
 
-# === Load only rows needing normalization ===
+# === Load data ===
 log.info("Loading only rows where norm_city_part is NULL...")
 geo = pd.read_sql(
     """
@@ -41,14 +45,13 @@ def norm_string(x):
 
 ruian['nazev_obce_norm'] = ruian['nazev_obce'].apply(norm_string)
 ruian['nazev_casti_obce_norm'] = ruian['nazev_casti_obce'].apply(norm_string)
-
 geo['city_norm'] = geo['city'].apply(norm_string)
 geo['city_part_norm'] = geo['city_part'].apply(norm_string)
 
-# === Step 1: Exact matching of city_part with city ===
+# === Step 1: Exact match ===
 log.info("Starting exact city_part/city matching...")
 
-norm_city_part_list = []
+matches = []
 matched_count = 0
 
 city_to_city_parts = ruian.groupby('nazev_obce_norm')['nazev_casti_obce_norm'].apply(set).to_dict()
@@ -62,69 +65,32 @@ for idx, row in geo.iterrows():
     if city_norm and city_part_norm:
         allowed_parts = city_to_city_parts.get(city_norm, set())
         if city_part_norm in allowed_parts:
-            try:
-                true_index = list(allowed_parts).index(city_part_norm)
-                norm_city_part = city_to_city_parts_true[city_norm][true_index]
-            except Exception:
-                norm_city_part = city_part_norm
-            matched_count += 1
+            true_parts = city_to_city_parts_true[city_norm]
+            for true_part in true_parts:
+                if norm_string(true_part) == city_part_norm:
+                    norm_city_part = true_part
+                    matched_count += 1
+                    break
 
-    norm_city_part_list.append(norm_city_part)
+    matches.append({
+        "internal_id": row["internal_id"],
+        "norm_city_part": norm_city_part
+    })
 
-geo['norm_city_part'] = norm_city_part_list
+exact_matches_df = pd.DataFrame(matches).dropna(subset=["internal_id"])
+exact_matches_df.set_index("internal_id", inplace=True)
+geo.set_index("internal_id", inplace=True)
+geo.update(exact_matches_df[["norm_city_part"]])
+geo.reset_index(inplace=True)
 
+# === Stats ===
 total = len(geo)
 unmatched_count = total - matched_count
-
 log.info(f"Total rows processed: {total}")
 log.info(f"Total matched by exact city_part/city: {matched_count}")
 log.info(f"Total unmatched: {unmatched_count}")
 
-# === Step 2: Fuzzy matching for unmatched ===
-FUZZY_THRESHOLD = 90
-fuzzy_matched = []
-still_unmatched = []
-
-for idx, row in geo[geo['norm_city_part'].isna()].iterrows():
-    city_norm = row['city_norm']
-    city_part_norm = row['city_part_norm']
-    if not city_norm or not city_part_norm:
-        still_unmatched.append((idx, row['city'], row['city_part']))
-        continue
-
-    options = ruian.loc[ruian['nazev_obce_norm'] == city_norm, 'nazev_casti_obce_norm'].dropna().unique().tolist()
-    if not options:
-        still_unmatched.append((idx, row['city'], row['city_part']))
-        continue
-
-    match = process.extractOne(city_part_norm, options, scorer=fuzz.ratio)
-    if match and match[1] >= FUZZY_THRESHOLD:
-        try:
-            matched_original = ruian[
-                (ruian['nazev_obce_norm'] == city_norm) &
-                (ruian['nazev_casti_obce_norm'] == match[0])
-            ]['nazev_casti_obce'].iloc[0]
-        except Exception:
-            matched_original = match[0]
-        geo.at[idx, 'norm_city_part'] = matched_original
-        fuzzy_matched.append((idx, row['city'], row['city_part'], matched_original, match[1]))
-    else:
-        still_unmatched.append((idx, row['city'], row['city_part']))
-
-log.info(f"Fuzzy matched city_part (threshold {FUZZY_THRESHOLD}): {len(fuzzy_matched)}")
-log.info(f"Still unmatched after fuzzy pass: {len(still_unmatched)}")
-
-# === Final statistics ===
-final_matched = geo['norm_city_part'].notna().sum()
-final_unmatched = geo['norm_city_part'].isna().sum()
-log.info(f"FINAL matched city_part: {final_matched}")
-log.info(f"FINAL unmatched city_part: {final_unmatched}")
-log.info("Sample matched rows (up to 10):")
-print(geo.loc[geo['norm_city_part'].notna(), ['internal_id', 'city', 'city_part', 'norm_city_part']].head(10).to_string())
-log.info("Sample unmatched rows (up to 10):")
-print(geo.loc[geo['norm_city_part'].isna(), ['internal_id', 'city', 'city_part', 'norm_city_part']].head(10).to_string())
-
-# === Batch update norm_city_part in DB ===
+# === Batch update ===
 def batch_update_norm_city_part(df, engine, batch_size=1000):
     conn = engine.raw_connection()
     cursor = conn.cursor()
@@ -134,11 +100,22 @@ def batch_update_norm_city_part(df, engine, batch_size=1000):
         FROM (VALUES %s) AS data(internal_id, norm_city_part)
         WHERE s.internal_id = data.internal_id
     """
-    data_tuples = [(int(row.internal_id), row.norm_city_part) for row in df.itertuples() if row.norm_city_part is not None]
+
+    data_tuples = [
+        (int(row.internal_id), row.norm_city_part)
+        for row in df.itertuples()
+        if pd.notna(row.internal_id) and row.norm_city_part is not None
+    ]
+
+    if not data_tuples:
+        log.info("No rows to update.")
+        return
+
     for i in range(0, len(data_tuples), batch_size):
         batch = data_tuples[i:i+batch_size]
         psycopg2.extras.execute_values(cursor, update_sql, batch, template=None, page_size=batch_size)
         conn.commit()
+
     cursor.close()
     conn.close()
 
